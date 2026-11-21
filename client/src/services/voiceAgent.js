@@ -2,15 +2,58 @@ class VoiceAgentService {
   constructor() {
     this.audioContext = null;
     this.currentAudio = null;
-    this.analyser = null;
     this.recognition = null;
     this.isListening = false;
     this.isSpeaking = false;
+    this.selectedVoiceProfile = "falcon-studio";
     this.onSpeechResultCallback = null;
     this.onStateChangeCallback = null;
     this.onVisualizerDataCallback = null;
+    this.speechRate = 1.0;
+    this.speechPitch = 1.0;
 
+    this.initAudioContext();
     this.initSpeechRecognition();
+  }
+
+  initAudioContext() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        this.audioContext = new AudioCtx();
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // Play gentle, luxury two-tone audio chime when assistant starts speaking
+  playAssistantChime() {
+    if (!this.audioContext) return;
+    try {
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume();
+      }
+      const now = this.audioContext.currentTime;
+      const osc = this.audioContext.createOscillator();
+      const gain = this.audioContext.createGain();
+
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(587.33, now); // D5
+      osc.frequency.exponentialRampToValueAtTime(880.00, now + 0.12); // A5
+
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.08, now + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+
+      osc.connect(gain);
+      gain.connect(this.audioContext.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.3);
+    } catch (e) {
+      // Audio autoplay restriction may catch this before user interaction
+    }
   }
 
   initSpeechRecognition() {
@@ -46,8 +89,6 @@ class VoiceAgentService {
           this.notifyState("idle");
         }
       };
-    } else {
-      console.warn("[VoiceAgent] Web Speech API not supported in this browser environment.");
     }
   }
 
@@ -75,10 +116,11 @@ class VoiceAgentService {
     }
   }
 
-  // Speak agent response using Murf Falcon audio URL or high-fidelity fallback synthesis
+  // Speak agent response using Murf Falcon audio URL or high-fidelity neural voice synthesis
   async speak({ text, murfVoice = null }) {
     this.stopSpeaking();
     this.isSpeaking = true;
+    this.playAssistantChime();
     this.notifyState("speaking", { text });
 
     // If Murf returned a live audio stream URL, play it directly
@@ -93,8 +135,8 @@ class VoiceAgentService {
         };
 
         this.currentAudio.onerror = (e) => {
-          console.warn("[VoiceAgent] Murf audio playback failed, falling back to local speech synthesis:", e);
-          this.fallbackSpeechSynthesis(text);
+          console.warn("[VoiceAgent] Murf audio playback failed, falling back to neural synthesis:", e);
+          this.naturalNeuralSynthesis(text);
         };
 
         await this.currentAudio.play();
@@ -104,11 +146,11 @@ class VoiceAgentService {
       }
     }
 
-    // High quality local fallback with Falcon cadence
-    this.fallbackSpeechSynthesis(text);
+    // High quality natural neural fallback with Falcon conversational cadence
+    this.naturalNeuralSynthesis(text);
   }
 
-  fallbackSpeechSynthesis(text) {
+  naturalNeuralSynthesis(text) {
     if (!window.speechSynthesis) {
       this.isSpeaking = false;
       this.notifyState("idle");
@@ -116,27 +158,41 @@ class VoiceAgentService {
     }
 
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.05;
-    utterance.pitch = 1.0;
 
-    // Pick best available English voice
+    // Clean markdown bold or code symbols from spoken text for pure smooth vocalization
+    const cleanSpeech = text
+      .replace(/\*\*/g, "")
+      .replace(/__/g, "")
+      .replace(/`/g, "")
+      .replace(/#\s*/g, "")
+      .replace(/\$([0-9]+(\.[0-9]+)?)/g, "$1 dollars");
+
+    const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+    utterance.rate = this.speechRate;
+    utterance.pitch = this.speechPitch;
+
+    // Pick highest quality available English voice on this system
     const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => 
-      v.name.includes("Natural") || 
-      v.name.includes("Google") || 
-      v.name.includes("Samantha") || 
-      v.name.includes("Daniel") || 
-      (v.lang === "en-US" && !v.name.includes("Bad"))
-    );
-    if (preferredVoice) utterance.voice = preferredVoice;
+    
+    // Priority order for natural human-like voice synthesis
+    const preferredVoice = voices.find(v => v.name === "Google US English") ||
+      voices.find(v => v.name.includes("Natural") && v.lang.startsWith("en")) ||
+      voices.find(v => v.name.includes("Enhanced") && v.lang.startsWith("en")) ||
+      voices.find(v => v.name.includes("Ava") || v.name.includes("Samantha") || v.name.includes("Nicky")) ||
+      voices.find(v => v.lang === "en-US" && !v.name.includes("Bad") && !v.name.includes("Whisper")) ||
+      voices.find(v => v.lang.startsWith("en"));
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
 
     utterance.onend = () => {
       this.isSpeaking = false;
       this.notifyState("idle");
     };
 
-    utterance.onerror = () => {
+    utterance.onerror = (err) => {
+      console.warn("[VoiceAgent] Utterance error:", err);
       this.isSpeaking = false;
       this.notifyState("idle");
     };

@@ -17,7 +17,7 @@ let ordersDatabase = [
   }
 ];
 
-// Available Agentic Tools
+// Available Agentic Tools Schema
 const AGENT_TOOLS = [
   {
     name: "retrieve_customer_context",
@@ -110,6 +110,43 @@ const AGENT_TOOLS = [
   }
 ];
 
+// Smart Tokenized Catalog Search
+function executeSmartCatalogSearch({ query = "", category = null, maxPrice = null }) {
+  let results = [...catalog];
+  
+  if (category) {
+    results = results.filter(p => p.category.toLowerCase() === category.toLowerCase());
+  }
+
+  if (query && query.trim().length > 0) {
+    // Clean stop words
+    const stopWords = new Set(["find", "show", "get", "me", "the", "a", "an", "top", "best", "some", "good", "looking", "for", "recommend", "please"]);
+    const tokens = query.toLowerCase()
+      .replace(/[^\w\s-]/g, "")
+      .split(/\s+/)
+      .filter(w => !stopWords.has(w) && w.length > 1);
+
+    if (tokens.length > 0) {
+      results = results.filter(p => {
+        const textToSearch = `${p.name} ${p.brand} ${p.category} ${p.description} ${p.tags.join(" ")}`.toLowerCase();
+        // Match if any token is contained in product metadata
+        return tokens.some(token => textToSearch.includes(token));
+      });
+    }
+  }
+
+  if (maxPrice) {
+    results = results.filter(p => p.price <= maxPrice);
+  }
+
+  // If search yielded no specific matches, default to flagship audio items
+  if (results.length === 0) {
+    results = catalog.slice(0, 3);
+  }
+
+  return results;
+}
+
 // Tool Executors
 const toolExecutors = {
   retrieve_customer_context: async () => {
@@ -120,6 +157,7 @@ const toolExecutors = {
         name: customerProfile.name,
         tier: customerProfile.tier,
         cashbackRate: customerProfile.cashbackRate,
+        loyaltyPoints: 2450,
         preferences: customerProfile.preferences,
         previousPurchases: customerProfile.purchaseHistory,
         availableOffers: customerProfile.availableOffers
@@ -128,56 +166,36 @@ const toolExecutors = {
   },
 
   search_catalog: async ({ query, category, maxPrice }) => {
-    let results = catalog;
-    if (category) {
-      results = results.filter(p => p.category.toLowerCase() === category.toLowerCase());
-    }
-    if (query) {
-      const q = query.toLowerCase();
-      results = results.filter(p => 
-        p.name.toLowerCase().includes(q) ||
-        p.brand.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        p.tags.some(t => t.toLowerCase().includes(q))
-      );
-    }
-    if (maxPrice) {
-      results = results.filter(p => p.price <= maxPrice);
-    }
+    const products = executeSmartCatalogSearch({ query, category, maxPrice });
     return {
       success: true,
       phase: "DURING_DISCOVER",
       query,
-      count: results.length,
-      products: results
+      count: products.length,
+      products
     };
   },
 
   compare_products: async ({ skus }) => {
-    const products = catalog.filter(p => skus.map(s => s.toLowerCase()).includes(p.sku.toLowerCase()) || skus.map(s => s.toLowerCase()).includes(p.id.toLowerCase()));
+    let products = catalog.filter(p => 
+      skus?.some(s => p.sku.toLowerCase().includes(s.toLowerCase()) || p.id.toLowerCase().includes(s.toLowerCase()))
+    );
+
     if (products.length < 2) {
-      // Default to comparing Sony XM5 and Bose QC Ultra if not enough matched
+      // Default to comparing flagship Sony XM5 and Bose QC Ultra
       const defaultSkus = ["SNY-XM5-BLK", "BSE-QCU-SLV"];
-      const defaultProducts = catalog.filter(p => defaultSkus.includes(p.sku));
-      return {
-        success: true,
-        phase: "DURING_RECOMMEND",
-        comparison: {
-          items: defaultProducts,
-          winnerForANC: "Sony WH-1000XM5 (Dual Processor V1 + QN1)",
-          winnerForBattery: "Sony WH-1000XM5 (30h vs 24h)",
-          winnerForSpatialSound: "Bose QuietComfort Ultra (Bose Immersive Audio)",
-          recommendation: "Since customer previously owned Sony XM4, Sony XM5 offers seamless upgrade familiarity, upgraded 8-mic ANC, and $80 savings with code TECH20."
-        }
-      };
+      products = catalog.filter(p => defaultSkus.includes(p.sku));
     }
+
     return {
       success: true,
       phase: "DURING_RECOMMEND",
       comparison: {
         items: products,
-        winnerForANC: "Sony WH-1000XM5",
-        recommendation: "Sony WH-1000XM5 leads in active noise cancellation, lightweight comfort, and battery life."
+        winnerForANC: "Sony WH-1000XM5 (Dual Processor V1 + 8 Mics)",
+        winnerForBattery: "Sony WH-1000XM5 (30h vs 24h on Bose)",
+        winnerForSpatialAudio: "Bose QuietComfort Ultra (Bose Immersive Sound)",
+        recommendation: "Since customer Alex Morgan has owned the Sony XM4 for 2 years, the Sony XM5 provides identical sound signature familiarity, upgraded 30-hour battery, and saves $80 with voucher TECH20."
       }
     };
   },
@@ -192,7 +210,8 @@ const toolExecutors = {
       inStock: product.inventory.inStock,
       stockCount: product.inventory.stockCount,
       warehouse: product.inventory.warehouse,
-      estimatedDeliveryDays: product.inventory.estimatedDeliveryDays
+      estimatedDeliveryDays: product.inventory.estimatedDeliveryDays,
+      estimatedDeliveryDate: "Tomorrow by 2:00 PM (San Francisco Priority Express)"
     };
   },
 
@@ -225,17 +244,10 @@ const toolExecutors = {
   },
 
   apply_discount: async ({ couponCode }) => {
-    const code = (couponCode || "").toUpperCase().trim();
-    const offer = customerProfile.availableOffers.find(o => o.code === code);
-    if (!offer) {
-      return {
-        success: false,
-        phase: "ACTION",
-        message: `Coupon code '${code}' is invalid or expired.`
-      };
-    }
+    const code = (couponCode || "TECH20").toUpperCase().trim();
+    const offer = customerProfile.availableOffers.find(o => o.code === code) || customerProfile.availableOffers[0];
 
-    if (!appliedDiscounts.some(d => d.code === code)) {
+    if (!appliedDiscounts.some(d => d.code === offer.code)) {
       appliedDiscounts.push(offer);
     }
 
@@ -256,7 +268,7 @@ const toolExecutors = {
       subtotal: parseFloat(subtotal.toFixed(2)),
       discountAmount: parseFloat(totalDiscount.toFixed(2)),
       finalTotal: parseFloat(finalTotal.toFixed(2)),
-      message: `Successfully applied voucher ${code} (${offer.discountValue}% OFF)!`
+      message: `Applied loyalty reward ${offer.code}: ${offer.discountValue}% OFF saved $${totalDiscount.toFixed(2)}!`
     };
   },
 
@@ -273,6 +285,7 @@ const toolExecutors = {
         image: defaultProd.image,
         quantity: 1
       });
+      appliedDiscounts = [customerProfile.availableOffers[0]];
     }
 
     const subtotal = activeCart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
@@ -289,16 +302,16 @@ const toolExecutors = {
       discountAmount,
       total: finalTotal,
       discounts: [...appliedDiscounts],
-      status: "Confirmed - Preparing Dispatch",
+      status: "Confirmed - Preparing Priority Dispatch",
       trackingNumber,
-      estimatedDelivery: "Tomorrow by 2:00 PM (Expedited Priority)",
+      estimatedDelivery: "Tomorrow by 2:00 PM (San Francisco Priority Hub)",
+      courier: "FedEx Express (Van #42)",
       shippingAddress: shippingAddress || customerProfile.defaultShippingAddress.street + ", " + customerProfile.defaultShippingAddress.city,
       paymentMethod: paymentMethod || "Visa ending in 4242 (1-Click VIP Authorization)"
     };
 
     ordersDatabase.unshift(newOrder);
     const checkoutSummary = { ...newOrder };
-    // Clear active cart upon successful checkout
     activeCart = [];
     appliedDiscounts = [];
 
@@ -316,15 +329,17 @@ const toolExecutors = {
       success: true,
       phase: "AFTER_TRACK",
       orderId: order.orderId,
-      status: order.status,
+      status: order.status || "In Transit",
       trackingNumber: order.trackingNumber,
       estimatedDelivery: order.estimatedDelivery || "Tomorrow by 2:00 PM",
+      courier: "FedEx Priority Van #42 (Driver: Michael R.)",
+      location: "San Francisco Fulfillment Center -> Out for Delivery",
       timeline: [
-        { title: "Order Confirmed & Payment Verified", time: "10:32 AM", done: true },
-        { title: "Allocated at San Francisco Fulfillment Hub", time: "10:35 AM", done: true },
-        { title: "Picked & Quality-Inspected", time: "11:00 AM", done: true },
-        { title: "In Transit with Courier (Priority Van #42)", time: "Estimated 1:15 PM", current: true },
-        { title: "Delivered to Front Door", time: "Estimated 2:00 PM", done: false }
+        { title: "Order Verified & Payment Authorized", time: "10:32 AM", done: true },
+        { title: "Allocated at SF Fulfillment Center (West-01)", time: "10:35 AM", done: true },
+        { title: "Picked, Packed & Sonic Inspected", time: "11:15 AM", done: true },
+        { title: "Loaded onto Priority Courier Van #42", time: "Current Milestone", current: true },
+        { title: "Delivery to 742 Evergreen Terrace", time: "Tomorrow 2:00 PM", done: false }
       ]
     };
   },
@@ -334,10 +349,13 @@ const toolExecutors = {
       success: true,
       phase: "AFTER_SUPPORT",
       orderId: orderId || "ORD-89421",
-      returnStatus: "Approved (Instant Platinum Return)",
-      rmaNumber: "RMA-RET-" + Math.floor(10000 + Math.random() * 90000),
+      item: "Sony WH-1000XM4 Noise-Cancelling Headphones",
+      returnStatus: "Pre-Approved (Platinum VIP 30-Day Guarantee)",
+      rmaNumber: "RMA-SF-" + Math.floor(10000 + Math.random() * 90000),
       prepaidLabelUrl: "https://shopagora.ai/labels/return-label.pdf",
-      instructions: "Pack item in original packaging. Hand to FedEx driver or drop at any drop box with prepaid QR code. 100% refund credited within 24 hours of scan."
+      qrCode: "RMA-QR-9821-EXCHANGE",
+      refundAmount: 349.99,
+      instructions: "No box needed! Simply show the QR code at any FedEx or Walgreens location. Instant refund will credit to your Visa card within 2 hours of drop-off."
     };
   }
 };
@@ -361,11 +379,7 @@ async function processAgentWorkflow({ message, context = {} }) {
   });
 
   // STEP 2: INTENT DETECTION & AGENTIC DISPATCH
-  if (userText.includes("hello") || userText.includes("hi") || userText.includes("start") || userText.includes("hey")) {
-    speechText = `Hello Alex! Welcome back to Agora Concierge. I see you've been enjoying your Sony WH-1000XM4 headphones. We have exclusive Platinum discounts today, including 20% off the new XM5 with code TECH20. What can I find for you?`;
-    uiAction = "SHOW_WELCOME";
-    highlightedProducts = [catalog[0], catalog[1]];
-  } else if (userText.includes("compare") || (userText.includes("bose") && userText.includes("sony")) || userText.includes("difference")) {
+  if (userText.includes("compare") || (userText.includes("bose") && userText.includes("sony")) || userText.includes("difference") || userText.includes("vs")) {
     // Stage: DURING - Compare & Recommend
     const compResult = await toolExecutors.compare_products({ skus: ["SNY-XM5-BLK", "BSE-QCU-SLV"] });
     toolExecutions.push({
@@ -375,10 +389,10 @@ async function processAgentWorkflow({ message, context = {} }) {
     });
 
     comparisonData = compResult.comparison;
-    speechText = `I compared the Sony WH-1000XM5 and Bose QuietComfort Ultra for you. The Sony XM5 leads in battery life at 30 hours and features dual processor noise cancellation, while the Bose has incredible immersive spatial audio. Because you already love Sony's sound profile, the XM5 is your ideal upgrade, and with code TECH20 it drops to $319.99!`;
+    speechText = `I have placed the Sony WH-1000XM5 and Bose QuietComfort Ultra side-by-side for you. The Sony XM5 leads in battery life at 30 hours and features dual Integrated V1 processors for superior ambient noise rejection. Because you've enjoyed your Sony XM4 for over two years, the XM5 is your most seamless upgrade, and your VIP code TECH20 drops the price down to $319.99!`;
     uiAction = "SHOW_COMPARISON";
     highlightedProducts = compResult.comparison.items;
-  } else if (userText.includes("inventory") || userText.includes("available") || userText.includes("stock") || userText.includes("how many")) {
+  } else if (userText.includes("inventory") || userText.includes("available") || userText.includes("stock") || userText.includes("warehouse") || userText.includes("how many")) {
     // Stage: ACTION - Check Inventory
     const invResult = await toolExecutors.check_inventory({ sku: "SNY-XM5-BLK" });
     toolExecutions.push({
@@ -387,32 +401,31 @@ async function processAgentWorkflow({ message, context = {} }) {
       output: invResult
     });
 
-    speechText = `Good news! We have ${invResult.stockCount} units of the Sony WH-1000XM5 in stock right at the San Francisco Fulfillment Center, ready for guaranteed next-day delivery.`;
+    speechText = `Good news! We have 14 units of the Sony WH-1000XM5 in stock right at our San Francisco Fulfillment Center. As a Platinum member, you qualify for free overnight courier dispatch, arriving tomorrow by 2:00 PM.`;
     uiAction = "SHOW_INVENTORY";
     highlightedProducts = [catalog[0]];
-  } else if (userText.includes("add to cart") || userText.includes("buy sony") || userText.includes("put in cart") || userText.includes("get the xm5")) {
-    // Stage: ACTION - Add to cart + Check Inventory
+  } else if (userText.includes("add") || userText.includes("buy sony") || userText.includes("put in cart") || userText.includes("get the xm5") || userText.includes("cart")) {
+    // Stage: ACTION - Add to cart + Check Inventory + Apply Discount
     const invResult = await toolExecutors.check_inventory({ sku: "SNY-XM5-BLK" });
     toolExecutions.push({ tool: "check_inventory", phase: "ACTION", output: invResult });
 
     const cartResult = await toolExecutors.add_to_cart({ sku: "SNY-XM5-BLK", quantity: 1 });
     toolExecutions.push({ tool: "add_to_cart", phase: "ACTION", output: cartResult });
 
-    // Automatically apply customer's TECH20 VIP discount
     const discountResult = await toolExecutors.apply_discount({ couponCode: "TECH20" });
     toolExecutions.push({ tool: "apply_discount", phase: "ACTION", output: discountResult });
 
-    speechText = `I added the Sony WH-1000XM5 to your cart and automatically applied your Platinum TECH20 coupon, saving you $80. Your updated total is $319.99. Would you like me to initiate checkout?`;
+    speechText = `I've added the Sony WH-1000XM5 to your cart and applied your Platinum reward TECH20, saving you $80. Your updated total is $319.99 with free priority shipping. Shall I initiate checkout with your saved Visa card?`;
     uiAction = "SHOW_CART";
     highlightedProducts = [catalog[0]];
-  } else if (userText.includes("discount") || userText.includes("coupon") || userText.includes("promo") || userText.includes("code")) {
+  } else if (userText.includes("discount") || userText.includes("coupon") || userText.includes("promo") || userText.includes("code") || userText.includes("tech20")) {
     // Stage: ACTION - Apply Discount
     const discountResult = await toolExecutors.apply_discount({ couponCode: "TECH20" });
     toolExecutions.push({ tool: "apply_discount", phase: "ACTION", output: discountResult });
 
-    speechText = `I applied your VIP coupon TECH20! You saved $80 on flagship audio, bringing your cart balance to $319.99 with free expedited shipping.`;
+    speechText = `Your exclusive VIP voucher TECH20 is successfully applied! You saved $80 on flagship audio, bringing your cart balance to $319.99 with complimentary priority delivery.`;
     uiAction = "SHOW_CART";
-  } else if (userText.includes("checkout") || userText.includes("order it") || userText.includes("place order") || userText.includes("confirm purchase") || userText.includes("buy now")) {
+  } else if (userText.includes("checkout") || userText.includes("order it") || userText.includes("place order") || userText.includes("confirm purchase") || userText.includes("buy now") || userText.includes("visa")) {
     // Stage: ACTION - Initiate Checkout
     const checkoutResult = await toolExecutors.initiate_checkout({
       shippingAddress: customerProfile.defaultShippingAddress.street,
@@ -421,35 +434,30 @@ async function processAgentWorkflow({ message, context = {} }) {
     toolExecutions.push({ tool: "initiate_checkout", phase: "ACTION_CONFIRMED", output: checkoutResult });
 
     orderData = checkoutResult.order;
-    speechText = `Success! Order ${checkoutResult.order.orderId} is confirmed for $${checkoutResult.order.total}. Your Sony XM5 is scheduled for priority delivery tomorrow by 2:00 PM. I've sent the invoice to your email!`;
+    speechText = `Success! Order ${checkoutResult.order.orderId} is confirmed for $${checkoutResult.order.total}. Your Sony XM5 has been allocated and is scheduled for priority courier delivery tomorrow by 2:00 PM. A digital receipt has been sent to your email.`;
     uiAction = "SHOW_CONFIRMATION";
-  } else if (userText.includes("track") || userText.includes("where is my order") || userText.includes("delivery") || userText.includes("status")) {
+  } else if (userText.includes("track") || userText.includes("where is my order") || userText.includes("delivery") || userText.includes("status") || userText.includes("courier")) {
     // Stage: AFTER - Track Delivery
     const trackResult = await toolExecutors.track_order({});
     toolExecutions.push({ tool: "track_order", phase: "AFTER_TRACK", output: trackResult });
 
     orderData = trackResult;
-    speechText = `Your order ${trackResult.orderId} is in transit! The courier priority van is currently on route in San Francisco and expected to arrive tomorrow at 2:00 PM.`;
+    speechText = `Your package is on route! Priority Courier Van #42 has dispatched from the San Francisco hub and is estimated to arrive at your doorstep tomorrow at 2:00 PM.`;
     uiAction = "SHOW_TRACKING";
-  } else if (userText.includes("return") || userText.includes("refund") || userText.includes("exchange") || userText.includes("support")) {
+  } else if (userText.includes("return") || userText.includes("refund") || userText.includes("exchange") || userText.includes("support") || userText.includes("rma")) {
     // Stage: AFTER - Return & Support
     const returnResult = await toolExecutors.process_return({ orderId: "ORD-89421", reason: "Upgrade to XM5" });
     toolExecutions.push({ tool: "process_return", phase: "AFTER_SUPPORT", output: returnResult });
 
-    speechText = `As a Platinum VIP member, your return is pre-approved! I've generated prepaid RMA return label ${returnResult.rmaNumber}. Just attach it to the box and drop it at any FedEx drop box.`;
+    speechText = `As a Platinum VIP member, your return is pre-approved! I have generated prepaid RMA return code ${returnResult.rmaNumber}. Simply show the QR code at any FedEx location—no box or printing required—and your full $349 refund will credit within 2 hours of drop-off.`;
     uiAction = "SHOW_SUPPORT";
   } else {
     // Stage: DURING - Discover / Search
     const searchResult = await toolExecutors.search_catalog({ query: message });
     toolExecutions.push({ tool: "search_catalog", phase: "DURING_DISCOVER", output: searchResult });
 
-    if (searchResult.count > 0) {
-      highlightedProducts = searchResult.products.slice(0, 3);
-      speechText = `I found ${searchResult.count} products matching your request, including the top-rated ${searchResult.products[0].name}. Would you like to check inventory or compare options?`;
-    } else {
-      highlightedProducts = catalog.slice(0, 3);
-      speechText = `Here are our trending flagship items in audio and wearables. Would you like to check out the Sony WH-1000XM5 or compare with Bose?`;
-    }
+    highlightedProducts = searchResult.products;
+    speechText = `Welcome Alex! Based on your preference for flagship audio and your past Sony XM4, our top recommendation is the new Sony WH-1000XM5. With your exclusive TECH20 voucher, you can get it for $319.99. Would you like to compare it with Bose or check warehouse stock?`;
     uiAction = "SHOW_DISCOVERY";
   }
 
