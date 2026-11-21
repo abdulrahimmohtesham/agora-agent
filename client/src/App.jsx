@@ -265,6 +265,7 @@ export default function App() {
           highlightedIds={highlightedProductIds}
           onAddToCart={handleAddToCart}
           onCompare={handleCompare}
+          onAskAI={handleSendMessage}
         />
 
       </main>
